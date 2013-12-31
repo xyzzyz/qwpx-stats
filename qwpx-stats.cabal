@@ -1,0 +1,21 @@
+Name:          qwpx-stats
+Version:       0.0.0
+-- Category:      Network
+Synopsis:      IRC log statistics generator
+Maintainer:    Adam Michalik <adam@michalik.es>
+Author:        Adam Michalik <adam@michalik.es>
+Copyright:     (c) 2013 Adam Michalik
+License:       GPL-3
+Build-type:    Simple
+Cabal-version: >= 1.6
+Description:
+  IRC log statistics generator
+
+
+
+Executable qwpx-stats
+  Build-depends:  base >= 4 && < 5, containers, lens,
+                  mtl, transformers, bytestring,
+                  optparse-applicative, time,
+                  conduit
+  Main-is:        Main.hs
