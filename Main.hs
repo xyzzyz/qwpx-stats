@@ -54,11 +54,7 @@ logFilesSource logs = logYearsSource logs $= logMonthsConduit $= logDaysConduit
 logYearsSource :: FilePath -> Source StatsM (Int, FilePath)
 logYearsSource logs = do
   years <- liftIO $ getDirectoriesMatching logs (=~ "\\d{4}")
-  CL.sourceList $ map makeYearPath years
-  where makeYearPath year = (read year, combine logs year)
-  
-
-  
+  CL.sourceList $ map ((,) <$> read <*> combine logs) years
 
 logMonthsConduit :: Conduit (Int, FilePath) StatsM (Int, Int, FilePath)
 logMonthsConduit = undefined
