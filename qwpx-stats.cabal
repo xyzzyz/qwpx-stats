@@ -16,6 +16,6 @@ Description:
 Executable qwpx-stats
   Build-depends:  base >= 4 && < 5, containers, lens,
                   mtl, transformers, bytestring,
-                  optparse-applicative, time,
-                  conduit
+                  optparse-applicative, time, directory, filepath,
+                  regex-pcre, conduit
   Main-is:        Main.hs

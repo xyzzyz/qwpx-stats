@@ -1,22 +1,26 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell #-}
+{-# LANGUAGE TemplateHaskell #-}
 import System.Environment
---import System.Directory
+import System.Directory
+import System.FilePath.Posix
 
 import qualified Options.Applicative as Opt
 import Options.Applicative
 
 import Data.Conduit
 import Data.Conduit.Binary
+import qualified Data.Conduit.List as CL
 import Data.Time
 
+import Text.Regex.PCRE
+
 import Control.Applicative
+import Control.Monad
+import Control.Monad.IO.Class
 import Control.Lens
 
 data StatsArgs = StatsArgs {
-  _logsPath :: String
+  _logsPath :: FilePath
   } deriving Show
-
-data LogFile = LogFile Day FilePath
 
 makeLenses ''StatsArgs
 
@@ -26,15 +30,45 @@ argsParser = StatsArgs <$>
                         <> metavar "LOGS"
                         <> help "Directory containing logs")
 
-stats :: StatsArgs -> IO ()
-stats args = do
-  let path = args^.logsPath
-  putStrLn path
-
 main = execParser args >>= stats
   where
     args = info (helper <*> argsParser)
       ( fullDesc
      <> progDesc "Generate statistics from IRC logs"
      <> header "qwpx-stats -- generate statistics" )
+
+type StatsM = IO
+
+data LogFile = LogFile Day FilePath
+
+getDirectoriesMatching :: FilePath -> (String -> Bool) -> IO [FilePath]
+getDirectoriesMatching path pattern = do
+  dirContents <- getDirectoryContents path
+  let matching = filter pattern dirContents
+  filterM doesDirectoryExist matching
+
+
+logFilesSource :: FilePath -> Source StatsM LogFile
+logFilesSource logs = logYearsSource logs $= logMonthsConduit $= logDaysConduit
+
+logYearsSource :: FilePath -> Source StatsM (Int, FilePath)
+logYearsSource logs = do
+  years <- liftIO $ getDirectoriesMatching logs (=~ "\\d{4}")
+  CL.sourceList $ map makeYearPath years
+  where makeYearPath year = (read year, combine logs year)
+  
+
+  
+
+logMonthsConduit :: Conduit (Int, FilePath) StatsM (Int, Int, FilePath)
+logMonthsConduit = undefined
+
+logDaysConduit :: Conduit (Int, Int, FilePath) StatsM LogFile
+logDaysConduit = undefined
+
+stats :: StatsArgs -> IO ()
+stats args = do
+  let path = args^.logsPath
+  putStrLn path
+
 
