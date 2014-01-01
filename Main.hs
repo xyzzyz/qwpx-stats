@@ -7,11 +7,14 @@ import System.IO
 import qualified Options.Applicative as Opt
 import Options.Applicative
 
+import Data.Array
 import qualified Data.ByteString as BS
 import Data.Conduit
 import qualified Data.Conduit.Binary as CB
 import qualified Data.Conduit.List as CL
 import Data.Time
+import qualified Data.Text as T
+import Data.Text.Encoding
 
 import Text.Regex.PCRE
 
@@ -46,6 +49,7 @@ type StatsM = ResourceT IO
 
 data LogFile = LogFile Day FilePath
                deriving (Show)
+
 getFilesMatching :: FilePath -> (String -> Bool) -> IO [FilePath]
 getFilesMatching path pattern = do
   dirContents <- getDirectoryContents path
@@ -67,40 +71,37 @@ logYearsSource logs = do
   CL.sourceList $ map (\year -> (read year, combine logs year)) years
 
 logMonthsConduit :: Conduit (Integer, FilePath) StatsM (Integer, Int, FilePath)
-logMonthsConduit = do
-  m <- await
-  case m of
-    Nothing -> log "All years processed"
-    Just (year, yearPath) -> do
-      log $ "Processing year " ++ show year
-      months <- liftIO $ getDirectoriesMatching yearPath (=~ "0[1-9]|1[0-2]")
-      CL.sourceList $ map (\month -> (year, read month, combine yearPath month)) months
-      logMonthsConduit
-  
+logMonthsConduit =
+  awaitForever $ \(year, yearPath) -> do
+    log $ "Processing year " ++ show year
+    months <- liftIO $ getDirectoriesMatching yearPath (=~ "0[1-9]|1[0-2]")
+    CL.sourceList $ map (\month -> (year, read month, combine yearPath month)) months
 
 logDaysConduit :: Conduit (Integer, Int, FilePath) StatsM LogFile
-logDaysConduit = do
-  m <- await
-  case m of
-    Nothing -> log "All months processed"
-    Just (year, month, monthPath) -> do
-      log $ "Processing month " ++ show year ++ "/" ++ show month
-      days <- liftIO $ getFilesMatching monthPath (=~ "([0-2][0-9]|3[0-1])\\.txt")
-      log $ "days " ++ show days
-      CL.sourceList $ map makeLogFile days
-      logDaysConduit
-      where makeLogFile day =
-              LogFile (fromGregorian year month (read . dropExtension $ day))
-                      (combine monthPath day)
+logDaysConduit = awaitForever $ \(year, month, monthPath) -> do
+  log $ "Processing month " ++ show year ++ "/" ++ show month
+  days <- liftIO $ getFilesMatching monthPath (=~ "([0-2][0-9]|3[0-1])\\.txt")
+  log $ "days " ++ show days
+  let makeLogFile day = LogFile (fromGregorian year month (read . dropExtension $ day))
+                                (combine monthPath day)
+  CL.sourceList $ map makeLogFile days
 
-logFileIrcLinesConduit :: Conduit LogFile StatsM (Day, BS.ByteString)
-logFileIrcLinesConduit = do
-  m <- await
-  case m of
-    Nothing -> log "All log files processed"
-    Just (LogFile day path) -> do
-      toProducer $ mapOutput ((,) day) $ CB.sourceFile path $= CB.lines
-      logFileIrcLinesConduit
+logFileIrcLinesConduit :: Conduit LogFile StatsM (Day, String)
+logFileIrcLinesConduit = awaitForever $ \(LogFile day path) -> do
+  toProducer $ mapOutput (((,) day) . T.unpack . decode) $ CB.sourceFile path $= CB.lines
+  where decode bs = decodeUtf8With (\_ a -> const '?' <$> a) bs
+
+ircLineAddTimeConduit :: Conduit (Day, String) StatsM (LocalTime, String)
+ircLineAddTimeConduit = awaitForever $ \(day, ircLine) -> do
+  let dateRegexp = "^(\\d{2}):(\\d{2}) (.*)$"
+      matchResult = ircLine =~ dateRegexp :: MatchResult String
+      match = mrSubs matchResult
+  if isArrayEmpty match
+    then log $ "Couldn't match line " ++ show ircLine ++ " with " ++ show dateRegexp
+    else let hour = read $ match ! 1
+             minute = read $ match ! 2
+             msg = match ! 3
+         in yield (LocalTime day (TimeOfDay hour minute 0), msg)
 
 debugShowSink :: Show a => Sink a StatsM ()
 debugShowSink = do
@@ -115,6 +116,12 @@ stats :: StatsArgs -> IO ()
 stats args = do
   let path = args^.logsPath
   putStrLn path
-  runResourceT $ logFilesSource path $$ debugShowSink
+  runResourceT $
+    logFilesSource path
+    $= logFileIrcLinesConduit
+    $= ircLineAddTimeConduit
+    $$ debugShowSink
 
+isArrayEmpty :: Ix i => Array i e -> Bool
+isArrayEmpty = (0 ==) . rangeSize . bounds
 
