@@ -2,6 +2,7 @@
 import System.Environment
 import System.Directory
 import System.FilePath.Posix
+import System.IO
 
 import qualified Options.Applicative as Opt
 import Options.Applicative
@@ -17,6 +18,9 @@ import Control.Applicative
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Lens
+
+log :: MonadIO m => String -> m ()
+log str = liftIO $ hPutStrLn stderr str
 
 data StatsArgs = StatsArgs {
   _logsPath :: FilePath
@@ -41,30 +45,66 @@ type StatsM = IO
 
 data LogFile = LogFile Day FilePath
 
+getFilesMatching :: FilePath -> (String -> Bool) -> IO [FilePath]
+getFilesMatching path pattern = do
+  dirContents <- getDirectoryContents path
+  return $ filter pattern dirContents
+
 getDirectoriesMatching :: FilePath -> (String -> Bool) -> IO [FilePath]
 getDirectoriesMatching path pattern = do
-  dirContents <- getDirectoryContents path
-  let matching = filter pattern dirContents
-  filterM doesDirectoryExist matching
+  matching <- getFilesMatching path pattern 
+  filterM (doesDirectoryExist . combine path) matching
 
 
 logFilesSource :: FilePath -> Source StatsM LogFile
 logFilesSource logs = logYearsSource logs $= logMonthsConduit $= logDaysConduit
 
-logYearsSource :: FilePath -> Source StatsM (Int, FilePath)
+logYearsSource :: FilePath -> Source StatsM (Integer, FilePath)
 logYearsSource logs = do
   years <- liftIO $ getDirectoriesMatching logs (=~ "\\d{4}")
-  CL.sourceList $ map ((,) <$> read <*> combine logs) years
+  log $ "years " ++ show years
+  CL.sourceList $ map (\year -> (read year, combine logs year)) years
 
-logMonthsConduit :: Conduit (Int, FilePath) StatsM (Int, Int, FilePath)
-logMonthsConduit = undefined
+logMonthsConduit :: Conduit (Integer, FilePath) StatsM (Integer, Int, FilePath)
+logMonthsConduit = do
+  m <- await
+  case m of
+    Nothing -> log "All years processed"
+    Just (year, yearPath) -> do
+      log $ "Processing year " ++ show year
+      months <- liftIO $ getDirectoriesMatching yearPath (=~ "0[1-9]|1[0-2]")
+      CL.sourceList $ map (\month -> (year, read month, combine yearPath month)) months
+      logMonthsConduit
+  
 
-logDaysConduit :: Conduit (Int, Int, FilePath) StatsM LogFile
-logDaysConduit = undefined
+logDaysConduit :: Conduit (Integer, Int, FilePath) StatsM LogFile
+logDaysConduit = do
+  m <- await
+  case m of
+    Nothing -> log "All months processed"
+    Just (year, month, monthPath) -> do
+      log $ "Processing month " ++ show year ++ "/" ++ show month
+      days <- liftIO $ getFilesMatching monthPath (=~ "([0-2][0-9]|3[0-1])\\.txt")
+      log $ "days " ++ show days
+      CL.sourceList $ map makeLogFile days
+      logDaysConduit
+      where makeLogFile day =
+              LogFile (fromGregorian year month (read . dropExtension $ day))
+                      (combine monthPath day)
+
+debugLogFileSink :: Sink LogFile StatsM ()
+debugLogFileSink = do
+  m <- await
+  case m of
+    Nothing -> log "Done"
+    Just (LogFile day path) -> do
+      log $ "got logFile " ++ path
+      debugLogFileSink
 
 stats :: StatsArgs -> IO ()
 stats args = do
   let path = args^.logsPath
   putStrLn path
+  logFilesSource path $$ debugLogFileSink
 
 
