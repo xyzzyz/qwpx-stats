@@ -7,8 +7,9 @@ import System.IO
 import qualified Options.Applicative as Opt
 import Options.Applicative
 
+import qualified Data.ByteString as BS
 import Data.Conduit
-import Data.Conduit.Binary
+import qualified Data.Conduit.Binary as CB
 import qualified Data.Conduit.List as CL
 import Data.Time
 
@@ -41,10 +42,10 @@ main = execParser args >>= stats
      <> progDesc "Generate statistics from IRC logs"
      <> header "qwpx-stats -- generate statistics" )
 
-type StatsM = IO
+type StatsM = ResourceT IO
 
 data LogFile = LogFile Day FilePath
-
+               deriving (Show)
 getFilesMatching :: FilePath -> (String -> Bool) -> IO [FilePath]
 getFilesMatching path pattern = do
   dirContents <- getDirectoryContents path
@@ -92,19 +93,28 @@ logDaysConduit = do
               LogFile (fromGregorian year month (read . dropExtension $ day))
                       (combine monthPath day)
 
-debugLogFileSink :: Sink LogFile StatsM ()
-debugLogFileSink = do
+logFileIrcLinesConduit :: Conduit LogFile StatsM (Day, BS.ByteString)
+logFileIrcLinesConduit = do
   m <- await
   case m of
-    Nothing -> log "Done"
+    Nothing -> log "All log files processed"
     Just (LogFile day path) -> do
-      log $ "got logFile " ++ path
-      debugLogFileSink
+      toProducer $ mapOutput ((,) day) $ CB.sourceFile path $= CB.lines
+      logFileIrcLinesConduit
+
+debugShowSink :: Show a => Sink a StatsM ()
+debugShowSink = do
+  m <- await
+  case m of
+    Nothing -> log "debug: done"
+    Just a -> do
+      log $ "debug: got  " ++ show a
+      debugShowSink
 
 stats :: StatsArgs -> IO ()
 stats args = do
   let path = args^.logsPath
   putStrLn path
-  logFilesSource path $$ debugLogFileSink
+  runResourceT $ logFilesSource path $$ debugShowSink
 
 
