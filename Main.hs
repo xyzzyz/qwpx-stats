@@ -42,12 +42,18 @@ argsParser = StatsArgs <$>
 
 data Stats = Stats {
   _userLineCountStats :: Map.Map String Int,
-  _userWordCountStats :: Map.Map String Int
+  _userWordCountStats :: Map.Map String Int,
+  _linesPerHourStats :: Map.Map Int Int,
+  _lastSeenStats :: Map.Map String LocalTime
   } deriving Show
 
 makeLenses ''Stats
 
-emptyStats = Stats Map.empty Map.empty
+emptyStats = Stats
+             Map.empty
+             Map.empty
+             (Map.fromList $ zip [0..23] (repeat 0))
+             Map.empty
 
 type StatsM = ResourceT (StateT Stats IO)
 
@@ -128,27 +134,43 @@ ircLineToIrcMessageConduit = awaitForever $ \(time, line) -> do
 parseIrcEvent :: String -> IrcMessage
 parseIrcEvent str = OtherMsg str
 
-type StatsCollectorConduit = Conduit (LocalTime, IrcMessage) StatsM (LocalTime, IrcMessage)
-
-lineCountCollector :: StatsCollectorConduit
-lineCountCollector = awaitForever $ \(_, message) -> do
+lineCountCollector _ message =
   case message of
     PrivMsg nick _ -> do
       userLineCountStats . at nick %= Just . maybe 1 (1+)
     otherwise -> return ()
 
-wordCountCollector :: StatsCollectorConduit
-wordCountCollector = awaitForever $ \(_, message) -> do
+wordCountCollector _ message =
   case message of
     PrivMsg nick msg ->
       let wordCount = length . words $ msg
       in userWordCountStats . at nick %= Just . maybe wordCount (+ wordCount)
     otherwise -> return ()
 
-statCollectors :: [StatsCollectorConduit]
-statCollectors = [lineCountCollector, wordCountCollector]
+linesPerHourCollector date _ = 
+  linesPerHourStats . at (todHour . localTimeOfDay $ date) %= Just . maybe 123 (1+)
 
-collectStatsConduit = foldr1 (=$=) statCollectors
+lastSeenStatsCollector date message =
+  case message of
+    PrivMsg nick _ -> maybeUpdateDate nick 
+    Action nick _ -> maybeUpdateDate nick
+    OtherMsg _ -> return ()
+  where maybeUpdateDate nick = lastSeenStats . at nick %= Just . maybe date (maxDate date)
+        maxDate date1 date2 = case signum $ diffDays (localDay date1) (localDay date2) of
+          1 -> date1
+          -1 -> date2
+          0 -> if timeOfDayToTime (localTimeOfDay date1) >=
+                  timeOfDayToTime (localTimeOfDay date2)
+               then date1 else date2 -- stack overflow wtf?
+
+makeConduitFromCollector collector = awaitForever $ \(date, message) -> do
+  collector date message
+  yield (date, message)
+
+statCollectors = [linesPerHourCollector, lastSeenStatsCollector,
+                  lineCountCollector, wordCountCollector]
+
+collectStatsConduit = foldr1 (=$=) . map makeConduitFromCollector $ statCollectors
 
 debugShowSink :: Show a => Sink a StatsM ()
 debugShowSink = do
