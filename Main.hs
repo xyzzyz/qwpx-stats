@@ -41,12 +41,13 @@ argsParser = StatsArgs <$>
                         <> help "Directory containing logs")
 
 data Stats = Stats {
-  _userLineStats :: Map.Map String Int
-  }
+  _userLineCountStats :: Map.Map String Int,
+  _userWordCountStats :: Map.Map String Int
+  } deriving Show
 
 makeLenses ''Stats
 
-emptyStats = Stats Map.empty
+emptyStats = Stats Map.empty Map.empty
 
 type StatsM = ResourceT (StateT Stats IO)
 
@@ -100,25 +101,28 @@ ircLineAddTimeConduit = awaitForever $ \(day, ircLine) -> do
       matchResult = ircLine =~ dateRegexp :: MatchResult String
       match = mrSubs matchResult
   if isArrayEmpty match
-    then log $ "Couldn't match line " ++ show ircLine ++ " with " ++ show dateRegexp
+    then when (take 3 ircLine /= "---") $
+         log $ "Couldn't match line " ++ show ircLine ++ " with " ++ show dateRegexp
     else let hour = read $ match ! 1
              minute = read $ match ! 2
              msg = match ! 3
          in yield (LocalTime day (TimeOfDay hour minute 0), msg)
 
 data IrcMessage = PrivMsg String String
+                | Action String String
                 | OtherMsg String
                   deriving (Show)
 
 ircLineToIrcMessageConduit :: Conduit (LocalTime, String) StatsM (LocalTime, IrcMessage)
 ircLineToIrcMessageConduit = awaitForever $ \(time, line) -> do
-  let msgRegexp = "^(<(?: @+)?(.*?)>|-!-) (.*)$"
+  let msgRegexp = "^(<(?: |@|\\+)?(.*?)>|-!-| \\*) ((\\S*?) ?(.*))$"
       matchResult = line =~ msgRegexp :: MatchResult String
       match = mrSubs matchResult
   if isArrayEmpty match
     then log $ "Couldn't match line " ++ show line ++ " with " ++ show msgRegexp
     else case match ! 1 of
       "-!-" -> yield $ (time, parseIrcEvent (match ! 3))
+      " * " -> yield $ (time, Action (match ! 4) (match ! 5))
       otherwise -> yield $ (time, PrivMsg (match ! 2) (match ! 3))
 
 parseIrcEvent :: String -> IrcMessage
@@ -130,8 +134,21 @@ lineCountCollector :: StatsCollectorConduit
 lineCountCollector = awaitForever $ \(_, message) -> do
   case message of
     PrivMsg nick _ -> do
-      userLineStats . at nick %= Just . maybe 0 (1+)
+      userLineCountStats . at nick %= Just . maybe 1 (1+)
     otherwise -> return ()
+
+wordCountCollector :: StatsCollectorConduit
+wordCountCollector = awaitForever $ \(_, message) -> do
+  case message of
+    PrivMsg nick msg ->
+      let wordCount = length . words $ msg
+      in userWordCountStats . at nick %= Just . maybe wordCount (+ wordCount)
+    otherwise -> return ()
+
+statCollectors :: [StatsCollectorConduit]
+statCollectors = [lineCountCollector, wordCountCollector]
+
+collectStatsConduit = foldr1 (=$=) statCollectors
 
 debugShowSink :: Show a => Sink a StatsM ()
 debugShowSink = do
@@ -152,8 +169,10 @@ stats args = do
                              $= logFileIrcLinesConduit
                              $= ircLineAddTimeConduit
                              $= ircLineToIrcMessageConduit
-                             $$ debugShowSink)
+                             $= collectStatsConduit
+                             $$ CL.sinkNull)
                  emptyStats
+  putStrLn $ show statsOutput
   return ()
               
 isArrayEmpty :: Ix i => Array i e -> Bool
