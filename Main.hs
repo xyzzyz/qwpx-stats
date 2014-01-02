@@ -103,6 +103,24 @@ ircLineAddTimeConduit = awaitForever $ \(day, ircLine) -> do
              msg = match ! 3
          in yield (LocalTime day (TimeOfDay hour minute 0), msg)
 
+data IrcMessage = PrivMsg String String
+                | OtherMsg String
+                  deriving (Show)
+
+ircLineToIrcMessageConduit :: Conduit (LocalTime, String) StatsM (LocalTime, IrcMessage)
+ircLineToIrcMessageConduit = awaitForever $ \(time, line) -> do
+  let msgRegexp = "^(<(?: @+)?(.*?)>|-!-) (.*)$"
+      matchResult = line =~ msgRegexp :: MatchResult String
+      match = mrSubs matchResult
+  if isArrayEmpty match
+    then log $ "Couldn't match line " ++ show line ++ " with " ++ show msgRegexp
+    else case match ! 1 of
+      "-!-" -> yield $ (time, parseIrcEvent (match ! 3))
+      otherwise -> yield $ (time, PrivMsg (match ! 2) (match ! 3))
+
+parseIrcEvent :: String -> IrcMessage
+parseIrcEvent str = OtherMsg str
+
 debugShowSink :: Show a => Sink a StatsM ()
 debugShowSink = do
   m <- await
@@ -120,6 +138,7 @@ stats args = do
     logFilesSource path
     $= logFileIrcLinesConduit
     $= ircLineAddTimeConduit
+    $= ircLineToIrcMessageConduit
     $$ debugShowSink
 
 isArrayEmpty :: Ix i => Array i e -> Bool
