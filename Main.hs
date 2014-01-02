@@ -12,6 +12,7 @@ import qualified Data.ByteString as BS
 import Data.Conduit
 import qualified Data.Conduit.Binary as CB
 import qualified Data.Conduit.List as CL
+import qualified Data.Map as Map
 import Data.Time
 import qualified Data.Text as T
 import Data.Text.Encoding
@@ -20,6 +21,7 @@ import Text.Regex.PCRE
 
 import Control.Applicative
 import Control.Monad
+import Control.Monad.State
 import Control.Monad.IO.Class
 import Control.Lens
 
@@ -38,14 +40,15 @@ argsParser = StatsArgs <$>
                         <> metavar "LOGS"
                         <> help "Directory containing logs")
 
-main = execParser args >>= stats
-  where
-    args = info (helper <*> argsParser)
-      ( fullDesc
-     <> progDesc "Generate statistics from IRC logs"
-     <> header "qwpx-stats -- generate statistics" )
+data Stats = Stats {
+  _userLineStats :: Map.Map String Int
+  }
 
-type StatsM = ResourceT IO
+makeLenses ''Stats
+
+emptyStats = Stats Map.empty
+
+type StatsM = ResourceT (StateT Stats IO)
 
 data LogFile = LogFile Day FilePath
                deriving (Show)
@@ -121,6 +124,15 @@ ircLineToIrcMessageConduit = awaitForever $ \(time, line) -> do
 parseIrcEvent :: String -> IrcMessage
 parseIrcEvent str = OtherMsg str
 
+type StatsCollectorConduit = Conduit (LocalTime, IrcMessage) StatsM (LocalTime, IrcMessage)
+
+lineCountCollector :: StatsCollectorConduit
+lineCountCollector = awaitForever $ \(_, message) -> do
+  case message of
+    PrivMsg nick _ -> do
+      userLineStats . at nick %= Just . maybe 0 (1+)
+    otherwise -> return ()
+
 debugShowSink :: Show a => Sink a StatsM ()
 debugShowSink = do
   m <- await
@@ -130,17 +142,26 @@ debugShowSink = do
       log $ "debug: got  " ++ show a
       debugShowSink
 
+
 stats :: StatsArgs -> IO ()
 stats args = do
   let path = args^.logsPath
   putStrLn path
-  runResourceT $
-    logFilesSource path
-    $= logFileIrcLinesConduit
-    $= ircLineAddTimeConduit
-    $= ircLineToIrcMessageConduit
-    $$ debugShowSink
-
+  statsOutput <- execStateT (runResourceT $
+                             logFilesSource path
+                             $= logFileIrcLinesConduit
+                             $= ircLineAddTimeConduit
+                             $= ircLineToIrcMessageConduit
+                             $$ debugShowSink)
+                 emptyStats
+  return ()
+              
 isArrayEmpty :: Ix i => Array i e -> Bool
 isArrayEmpty = (0 ==) . rangeSize . bounds
 
+main = execParser args >>= stats
+  where
+    args = info (helper <*> argsParser)
+      ( fullDesc
+     <> progDesc "Generate statistics from IRC logs"
+     <> header "qwpx-stats -- generate statistics" )
